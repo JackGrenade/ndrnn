@@ -1,84 +1,51 @@
-from cma import CMAEvolutionStrategy as cmaes
 import gym
-from network import RNN, NN, HNN
 import numpy as np
-import functools
-from random import Random
-from multiprocessing import Pool
-import pickle
+from cma import CMAEvolutionStrategy
+from network import Network
 
-def eval(x, render=False):
-    cumulative_rewards = []
-    task = gym.make("LunarLander-v2")
-    agent = NN([8, 5, 4])
-    agent.set_weights(x)
-    for i in range(100):
-        cumulative_rewards.append(0)
+class GymTaskNN:
+    def init(self, env_name, num_hidden_layers, neurons_per_hidden_layer, population_size):
+        self.env_name = env_name
+        self.num_hidden_layers = num_hidden_layers
+        self.neurons_per_hidden_layer = neurons_per_hidden_layer
+        self.population_size = population_size
+        self.networks = [Network(self.get_num_inputs(), self.get_num_outputs(), num_hidden_layers, neurons_per_hidden_layer) for _ in range(population_size)]
+        self.env = gym.make(env_name)
+        
+    def get_num_inputs(self):
+        return self.env.observation_space.shape[0]
+
+    def get_num_outputs(self):
+        return self.env.action_space.n
+
+    def get_rewards(self, weights):
+        self.networks[0].set_weights(weights)
+        state = self.env.reset()
         done = False
-        task.seed(i)
-        obs = task.reset()
-        counter = 0
+        total_reward = 0
         while not done:
-            output = agent.activate(obs)
+            action = np.argmax(self.networks[0].predict(state.reshape(1, -1)))
+            state, reward, done, info = self.env.step(action)
+            total_reward += reward
+        return total_reward
 
-            # arr[output]+=1
-            if render:
-                task.render()
-            obs, rew, done, _ = task.step(np.argmax(output))
-            cumulative_rewards[-1] += rew
-        counter += 1
+    def train(self, num_iterations):
+        es = CMAEvolutionStrategy(self.networks[0].get_weights(), 0.1)
+        for i in range(num_iterations):
+            solutions = es.ask()
+            rewards = [self.get_rewards(weights) for weights in solutions]
+            es.tell(solutions, rewards)
+            best_weights = es.best.get()[0]
+            self.networks[0].set_weights(best_weights)
+            print("Iteration {}: Best Reward = {}".format(i+1, self.get_rewards(best_weights)))
 
-    return -sum(cumulative_rewards) / 100
-
-
-def generator(random, args):
-    return np.asarray([random.uniform(args["pop_init_range"][0],
-                                      args["pop_init_range"][1])
-                       for _ in range(args["num_vars"])])
-
-
-def generator_wrapper(func):
-    @functools.wraps(func)
-    def _generator(random, args):
-        return np.asarray(func(random, args))
-
-    return _generator
-
-def parallel_val(candidates):
-    with Pool(20) as p:
-        return p.map(eval, candidates)
-
-if __name__ == "__main__":
-    args = {}
-    fka = NN([8, 5, 4])
-    rng = np.random.default_rng()
-    #eval(rng.random(fka.nweights*4), render=True)
-
-
-    args["num_vars"] = fka.nweights  # Number of dimensions of the search space
-    args["max_generations"] = 50
-    args["sigma"] = 1.0  # default standard deviation
-    args["pop_size"] = 4  # mu
-    args["num_offspring"] = 20  # lambda
-    args["pop_init_range"] = [0, 1]  # Range for the initial population
-
-    random = Random(0)
-    es = cmaes(generator(random, args),
-               args["sigma"],
-               {'popsize': args["num_offspring"],
-                'seed': 0,
-                'CMA_mu': args["pop_size"]})
-    gen = 0
-    while gen <= args["max_generations"]:
-        candidates = es.ask()  # get list of new solutions
-        fitnesses = parallel_val(candidates)
-        print("generation "+str(gen)+"  "+str(min(fitnesses))+"  "+str(np.mean(fitnesses)))
-        es.tell(candidates, fitnesses)
-        gen += 1
-    final_pop = np.asarray(es.ask())
-    final_pop_fitnesses = np.asarray(parallel_val(final_pop))
-
-    best_guy = es.best.x
-    best_fitness = es.best.f
-    with open("./nn_test_"+str(best_fitness)+".pkl", "wb") as f:
-        pickle.dump(best_guy, f)
+    def test(self, num_episodes):
+        total_reward = 0
+        for i in range(num_episodes):
+            state = self.env.reset()
+            done = False
+            while not done:
+                action = np.argmax(self.networks[0].predict(state.reshape(1, -1)))
+                state, reward, done, info = self.env.step(action)
+                total_reward += reward
+        print("Average Reward over {} episodes: {}".format(num_episodes, total_reward/num_episodes))
